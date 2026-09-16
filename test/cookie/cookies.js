@@ -28,6 +28,7 @@ const {
   deleteCookie,
   getCookies,
   getSetCookies,
+  parseCookie,
   setCookie,
   Headers
 } = require('../..')
@@ -598,6 +599,67 @@ test('Set-Cookie parser', () => {
 
   headers = new Headers()
   assert.deepEqual(getSetCookies(headers), [])
+})
+
+test('Set-Cookie parser does not percent-decode cookie values', () => {
+  assert.deepEqual(
+    parseCookie(
+      'token=legit%0d%0aSet-Cookie:%20evil=injected%3B%20Path%3D/'
+    ),
+    {
+      name: 'token',
+      value: 'legit%0d%0aSet-Cookie:%20evil=injected%3B%20Path%3D/'
+    }
+  )
+
+  assert.deepEqual(parseCookie('data=prefix%00suffix'), {
+    name: 'data',
+    value: 'prefix%00suffix'
+  })
+})
+
+test('Set-Cookie parser only accepts exact SameSite values', () => {
+  assert.deepEqual(parseCookie('a=b; SameSite=none'), {
+    name: 'a',
+    value: 'b',
+    sameSite: 'None'
+  })
+
+  assert.deepEqual(parseCookie('a=b; SameSite=StrictLax'), {
+    name: 'a',
+    value: 'b'
+  })
+
+  assert.deepEqual(parseCookie('a=b; SameSite=NoneOfYourBusiness'), {
+    name: 'a',
+    value: 'b'
+  })
+})
+
+test('getSetCookies does not decode CRLF into the cookie value or downgrade SameSite', () => {
+  const rawSetCookie = 'token=legit%0d%0aSet-Cookie:%20evil=injected%3B%20Path%3D/; SameSite=Nonexistent'
+  const headers = new Headers({ 'set-cookie': rawSetCookie })
+  const cookies = getSetCookies(headers)
+
+  // The percent-encoded sequences must be preserved verbatim; decoding them
+  // would smuggle a CRLF (and a second Set-Cookie header) into the value.
+  assert.deepStrictEqual(cookies, [{
+    name: 'token',
+    value: 'legit%0d%0aSet-Cookie:%20evil=injected%3B%20Path%3D/'
+  }])
+
+  assert.ok(!cookies[0].value.includes('\r'))
+  assert.ok(!cookies[0].value.includes('\n'))
+  assert.ok(!cookies[0].value.includes(';'))
+  assert.strictEqual(cookies[0].sameSite, undefined)
+
+  // Re-serializing the parsed cookie must reproduce the original header
+  // byte-for-byte: no injected header, no invented SameSite=None.
+  const roundTrip = new Headers()
+  setCookie(roundTrip, cookies[0])
+  assert.deepStrictEqual(roundTrip.getSetCookie(), [
+    'token=legit%0d%0aSet-Cookie:%20evil=injected%3B%20Path%3D/'
+  ])
 })
 
 test('Cookie setCookie throws if headers is not of type Headers', () => {
