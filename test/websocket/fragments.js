@@ -2,7 +2,7 @@
 
 const { test, after } = require('node:test')
 const { WebSocketServer } = require('ws')
-const { WebSocket } = require('../..')
+const { Agent, WebSocket } = require('../..')
 const diagnosticsChannel = require('node:diagnostics_channel')
 
 test('Fragmented frame with a ping frame in the middle of it', (t) => {
@@ -36,6 +36,201 @@ test('Fragmented frame with a ping frame in the middle of it', (t) => {
 
       ws.close()
       resolve()
+    })
+  })
+})
+
+test('Too many fragments (uncompressed)', (t, done) => {
+  t.plan(4)
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  // Only tear down once both peers have observed the close, otherwise the
+  // server-side close can end the test before the client-side assertions run.
+  let closing = 2
+  const closed = () => {
+    if (--closing === 0) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  const server = new WebSocketServer({ port: 0 }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', (event) => {
+      t.assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      t.assert.deepStrictEqual(event.code, 1006)
+      closed()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      t.assert.deepStrictEqual(code, 1008)
+      t.assert.deepStrictEqual(reason.toString(), 'Too many message fragments')
+      closed()
+    })
+
+    const fragment = Buffer.from('a')
+    const options = { fin: false }
+
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+  })
+})
+
+test('Too many fragments (compressed)', (t, done) => {
+  t.plan(4)
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  // Only tear down once both peers have observed the close, otherwise the
+  // server-side close can end the test before the client-side assertions run.
+  let closing = 2
+  const closed = () => {
+    if (--closing === 0) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  const server = new WebSocketServer({
+    perMessageDeflate: { threshold: 0 },
+    port: 0
+  }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', (event) => {
+      t.assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      t.assert.deepStrictEqual(event.code, 1006)
+      closed()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      t.assert.deepStrictEqual(code, 1008)
+      t.assert.deepStrictEqual(reason.toString(), 'Too many message fragments')
+      closed()
+    })
+
+    const fragment = Buffer.from('a')
+    const options = { fin: false }
+
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+  })
+})
+
+test('Too many empty fragments triggers close 1008', (t, done) => {
+  // RFC 6455 §5.4 allows zero-length fragments, so a peer can flood empty
+  // continuation frames forever. Empty fragments must count toward the cap
+  // exactly like non-empty ones.
+  t.plan(4)
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  let closing = 2
+  const closed = () => {
+    if (--closing === 0) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  const server = new WebSocketServer({ port: 0 }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', (event) => {
+      t.assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      t.assert.deepStrictEqual(event.code, 1006)
+      closed()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      t.assert.deepStrictEqual(code, 1008)
+      t.assert.deepStrictEqual(reason.toString(), 'Too many message fragments')
+      closed()
+    })
+
+    const fragment = ''
+    const options = { fin: false }
+
+    ws.send(fragment, options) // Text frame, fin=0, length=0
+    ws.send(fragment, options) // Continuation frame, fin=0, length=0
+    ws.send(fragment, options) // Continuation frame, fin=0, length=0
+    ws.send(fragment, options) // Continuation frame, fin=0, length=0
+  })
+})
+
+test('Empty first fragment is still part of the message', (t) => {
+  // A zero-length *opening* fragment must be recorded, otherwise the
+  // continuation that follows is rejected with 1002 'Unexpected continuation
+  // frame' and the message is never delivered.
+  const server = new WebSocketServer({ port: 0 })
+
+  server.on('connection', (ws) => {
+    ws.send('', { fin: false }) // Text frame, fin=0, length=0
+    ws.send('hello', { fin: true }) // Continuation frame, fin=1, "hello"
+  })
+
+  after(() => {
+    for (const client of server.clients) {
+      client.close()
+    }
+
+    server.close()
+  })
+
+  const ws = new WebSocket(`ws://localhost:${server.address().port}`)
+
+  return new Promise((resolve, reject) => {
+    ws.addEventListener('message', ({ data }) => {
+      t.assert.strictEqual(data, 'hello')
+
+      ws.close()
+      resolve()
+    })
+
+    ws.addEventListener('close', (event) => {
+      reject(new Error(`connection closed with code ${event.code} before the message was received`))
     })
   })
 })
