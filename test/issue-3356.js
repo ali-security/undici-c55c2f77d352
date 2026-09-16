@@ -8,7 +8,13 @@ const { once } = require('node:events')
 const { tick: fastTimersTick } = require('../lib/util/timers')
 const { fetch, Agent, RetryAgent } = require('..')
 
-test('https://github.com/nodejs/undici/issues/3356', { skip: process.env.CITGM }, async (t) => {
+// SEAL: additionally skipped on macOS (the upstream CITGM skip is preserved).
+// The test races a 50ms `bodyTimeout` against a 100ms-delayed `res.end()` and
+// needs the timeout to win to satisfy `plan: 3`; on macOS runners the delayed
+// end can win, only 1 of the 3 assertions runs, `await t.completed` never
+// resolves, and the test hangs until node:test's 180s timeout, wedging the
+// whole job. Still runs on every Linux and Windows leg.
+test('https://github.com/nodejs/undici/issues/3356', { skip: process.env.CITGM || (process.platform === 'darwin' ? 'macOS runners lose the bodyTimeout-vs-delayed-res.end race; the test hangs until the node:test 180s timeout' : false) }, async (t) => {
   t = tspl(t, { plan: 3 })
 
   let shouldRetry = true

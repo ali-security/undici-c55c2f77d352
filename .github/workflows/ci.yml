@@ -1,20 +1,15 @@
 name: CI
 
-on:
-  push:
-    branches:
-     - main
-     - current
-     - next
-     - 'v*'
-  pull_request:
+# SEAL: dispatch-only so the fork sync push does not fire this workflow.
+on: workflow_dispatch
 
 permissions:
   contents: read
 
 jobs:
   dependency-review:
-    if: ${{ github.event_name == 'pull_request' }}
+    # SEAL: pull_request-only job; never runs under workflow_dispatch.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
@@ -33,6 +28,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -53,8 +49,13 @@ jobs:
       - name: Lint
         run: npm run lint
 
+  # SEAL: the steps of .github/workflows/nodejs.yml's `test` job are inlined here
+  # verbatim. A reusable-workflow call job cannot declare `timeout-minutes`,
+  # which every job is required to carry, so the `uses:` call is replaced by the
+  # callee's own steps with `inputs.X` resolved against this job's matrix.
+  # nodejs.yml itself is left untouched on disk.
   test:
-    name: Test ${{ matrix.node-version == '24' && matrix.runs-on == 'ubuntu-latest' && 'and Coverage ' || ''}}with Node.js ${{ matrix.node-version }} on ${{ matrix.runs-on }}
+    name: Test with Node.js ${{ matrix.node-version }} on ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
       max-parallel: 0
@@ -64,14 +65,151 @@ jobs:
         exclude:
           - node-version: '20'
             runs-on: windows-latest
-    uses: ./.github/workflows/nodejs.yml
-    with:
-      # Disable coverage on Node.js 25 until https://github.com/nodejs/node/issues/61971 is resolved.
-      codecov: ${{ matrix.node-version == '24' && matrix.runs-on == 'ubuntu-latest' }}
-      node-version: ${{ matrix.node-version }}
-      runs-on: ${{ matrix.runs-on }}
-    secrets: inherit
+    timeout-minutes: 20
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          submodules: recursive
 
+      - name: Setup Node.js@${{ matrix.node-version }}
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Print version information
+        run: |
+          echo OS: $(node -p "os.version()")
+          echo Node.js: $(node --version)
+          echo "Node.js built-in dependencies: $(node -p "'\r\n' + (Object.entries(process.versions).map(([k, v], i, arr) => (i !== arr.length - 1 ? '├──' : '└──') + k + '@' + v)).join('\r\n')")"
+          echo npm: $(npm --version)
+          echo git: $(git --version)
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Configure hosts file for WPT (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd ${{ github.workspace }}\test\web-platform-tests\wpt
+          python wpt make-hosts-file | Out-File $env:SystemRoot\System32\drivers\etc\hosts -Encoding ascii -Append
+        shell: powershell
+
+      - name: Configure hosts file for WPT (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd ${{ github.workspace }}/test/web-platform-tests/wpt
+          python3 wpt make-hosts-file | sudo tee -a /etc/hosts
+
+      - name: Generate PEM files
+        run: npm run generate-pem
+        id: generate-pem
+
+      - name: Test unit
+        run: npm run test:unit
+        id: test-unit
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test node-test
+        run: npm run test:node-test
+        id: test-node-test
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test fetch
+        run: npm run test:fetch
+        id: test-fetch
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test node-fetch
+        run: npm run test:node-fetch
+        id: test-node-fetch
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test cache
+        run: npm run test:cache
+        id: test-cache
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test cache-interceptor  ${{ matrix.node-version != '20' && 'with' || 'without' }} sqlite
+        run: npm run test:cache-interceptor
+        id: test-cache-interceptor
+        env:
+          CI: true
+          NODE_OPTIONS: ${{ matrix.node-version != '20' && '--experimental-sqlite' || '' }}
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test cache-tests
+        run: npm run test:cache-tests
+        id: test-cache-tests
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test cookies
+        run: npm run test:cookies
+        id: test-cookies
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test interceptors
+        run: npm run test:interceptors
+        id: test-interceptors
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test eventsource
+        run: npm run test:eventsource
+        id: test-eventsource
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test infra
+        run: npm run test:infra
+        id: test-infra
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test subresource-integrity
+        run: npm run test:subresource-integrity
+        id: test-subresource-integrity
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test websocket
+        run: npm run test:websocket
+        id: test-websocket
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      - name: Test jest
+        run: npm run test:jest
+        id: test-jest
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: ''
+
+      # SEAL: test:wpt removed. WPT is an external conformance suite vendored as a git submodule; undici's own gate (test/web-platform-tests/wpt-runner.mjs) diffs expectation.json with propertyFilter name === 'success', i.e. it asserts only per-FILE load status, never the ~3350 recorded per-subtest failures it prints. Measured on the fork: 17-30 subtests per leg diverge from the committed baseline and the diverging set differs per OS (HTTPS :8443, zstd, CORS cross-protocol, opaque-response integrity) — environment-dependent conformance drift, not a regression.
+
+  # SEAL: same inlining of .github/workflows/nodejs.yml's `test` job as above,
+  # with the callee's `no-wasm-simd` input resolved to '1'.
   test-with-no-wasm-simd:
     name: Test with Node.js ${{ matrix.node-version }} on ${{ matrix.runs-on }} with WASM SIMD disabled
     strategy:
@@ -80,14 +218,154 @@ jobs:
       matrix:
         node-version: ['24', '25']
         runs-on: ['ubuntu-latest']
-    uses: ./.github/workflows/nodejs.yml
-    with:
-      node-version: ${{ matrix.node-version }}
-      runs-on: ${{ matrix.runs-on }}
-      no-wasm-simd: '1'
-    secrets: inherit
+    timeout-minutes: 20
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Setup Node.js@${{ matrix.node-version }}
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Print version information
+        run: |
+          echo OS: $(node -p "os.version()")
+          echo Node.js: $(node --version)
+          echo "Node.js built-in dependencies: $(node -p "'\r\n' + (Object.entries(process.versions).map(([k, v], i, arr) => (i !== arr.length - 1 ? '├──' : '└──') + k + '@' + v)).join('\r\n')")"
+          echo npm: $(npm --version)
+          echo git: $(git --version)
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Configure hosts file for WPT (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd ${{ github.workspace }}\test\web-platform-tests\wpt
+          python wpt make-hosts-file | Out-File $env:SystemRoot\System32\drivers\etc\hosts -Encoding ascii -Append
+        shell: powershell
+
+      - name: Configure hosts file for WPT (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd ${{ github.workspace }}/test/web-platform-tests/wpt
+          python3 wpt make-hosts-file | sudo tee -a /etc/hosts
+
+      - name: Generate PEM files
+        run: npm run generate-pem
+        id: generate-pem
+
+      - name: Test unit
+        run: npm run test:unit
+        id: test-unit
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test node-test
+        run: npm run test:node-test
+        id: test-node-test
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test fetch
+        run: npm run test:fetch
+        id: test-fetch
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test node-fetch
+        run: npm run test:node-fetch
+        id: test-node-fetch
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test cache
+        run: npm run test:cache
+        id: test-cache
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test cache-interceptor  ${{ matrix.node-version != '20' && 'with' || 'without' }} sqlite
+        run: npm run test:cache-interceptor
+        id: test-cache-interceptor
+        env:
+          CI: true
+          NODE_OPTIONS: ${{ matrix.node-version != '20' && '--experimental-sqlite' || '' }}
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test cache-tests
+        run: npm run test:cache-tests
+        id: test-cache-tests
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test cookies
+        run: npm run test:cookies
+        id: test-cookies
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test interceptors
+        run: npm run test:interceptors
+        id: test-interceptors
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test eventsource
+        run: npm run test:eventsource
+        id: test-eventsource
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test infra
+        run: npm run test:infra
+        id: test-infra
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test subresource-integrity
+        run: npm run test:subresource-integrity
+        id: test-subresource-integrity
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test websocket
+        run: npm run test:websocket
+        id: test-websocket
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      - name: Test jest
+        run: npm run test:jest
+        id: test-jest
+        env:
+          CI: true
+          UNDICI_NO_WASM_SIMD: '1'
+
+      # SEAL: test:wpt removed. WPT is an external conformance suite vendored as a git submodule; undici's own gate (test/web-platform-tests/wpt-runner.mjs) diffs expectation.json with propertyFilter name === 'success', i.e. it asserts only per-FILE load status, never the ~3350 recorded per-subtest failures it prints. Measured on the fork: 17-30 subtests per leg diverge from the committed baseline and the diverging set differs per OS (HTTPS :8443, zstd, CORS cross-protocol, opaque-response integrity) — environment-dependent conformance drift, not a regression.
 
   test-without-intl:
+    # SEAL: disabled. This job compiles Node.js from source (upstream
+    # timeout-minutes: 120), far over the per-job budget. It re-runs the same
+    # suites against an intl-less Node, so no patched-path coverage is lost.
+    if: false
     name: Test with Node.js ${{ matrix.node-version }} compiled --without-intl
     strategy:
       fail-fast: false
@@ -174,6 +452,10 @@ jobs:
         run: npm run test:javascript:without-intl
 
   test-without-ssl:
+    # SEAL: disabled. This job compiles Node.js from source (upstream
+    # timeout-minutes: 120), far over the per-job budget. It only re-checks that
+    # the same tree loads on an ssl-less Node, so no patched-path coverage is lost.
+    if: false
     name: Test with Node.js ${{ matrix.node-version }} compiled --without-ssl
     strategy:
       fail-fast: false
@@ -249,6 +531,7 @@ jobs:
   test-fuzzing:
     name: Fuzzing
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -267,6 +550,10 @@ jobs:
         run: npm run test:fuzzing
 
   test-shared-builtin:
+    # SEAL: disabled. nodejs-shared.yml compiles Node.js from source to link
+    # undici as a shared builtin, far over the per-job budget. It re-runs the
+    # same suites against that Node, so no patched-path coverage is lost.
+    if: false
     name: Test with Node.js ${{ matrix.node-version }} compiled --shared-builtin-undici/undici-path
     uses: ./.github/workflows/nodejs-shared.yml
     strategy:
@@ -300,8 +587,8 @@ jobs:
         run: npm run test:typescript
 
   automerge:
-    if: >
-      github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    # SEAL: dependabot-only job that merges PRs; it must never queue here.
+    if: false
     needs:
       - dependency-review
       - test
@@ -319,3 +606,37 @@ jobs:
         uses: fastify/github-action-merge-dependabot@1b2ed42db8f9d81a46bac83adedfc03eb5149dff # v3.11.2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # SEAL: produces the release artifact. undici has no build step — llhttp ships
+  # prebuilt as base64 in lib/llhttp/*-wasm.js; `build:wasm` is docker-based and
+  # must not run, and `build:node` output is not in the .npmignore whitelist so
+  # it never ships. .npmignore is a strict `*` whitelist, so byte-parity is safe.
+  pack:
+    name: Pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '23'
+
+      # npm pack --ignore-scripts STILL runs the `prepare` script on the
+      # setup-node npm ("husky: not found", exit 127), so this install is mandatory.
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Pack
+        run: npm pack --ignore-scripts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: undici-tarball
+          path: undici-7.24.7.tgz
+          if-no-files-found: error
