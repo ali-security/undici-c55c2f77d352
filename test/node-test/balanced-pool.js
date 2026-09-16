@@ -3,7 +3,10 @@
 const { describe, test } = require('node:test')
 const assert = require('node:assert/strict')
 const { BalancedPool, Pool, Client, errors } = require('../..')
+const fs = require('node:fs')
 const { createServer } = require('node:http')
+const https = require('node:https')
+const path = require('node:path')
 const { promisify } = require('node:util')
 const { tspl } = require('@matteo.collina/tspl')
 
@@ -600,6 +603,132 @@ describe('weighted round robin', () => {
       await client.close()
     })
   }
+})
+
+test('forwards TLS certificate validation callbacks', async (t) => {
+  const server = https.createServer({
+    key: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'key.pem')),
+    cert: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cert.pem'))
+  }, (req, res) => {
+    res.end('ok')
+  })
+  t.after(server.close.bind(server))
+  await promisify(server.listen).call(server, 0)
+
+  const expectedError = new Error('rejected by custom checkServerIdentity')
+  let identityChecks = 0
+  const pool = new BalancedPool(`https://localhost:${server.address().port}`, {
+    connect: {
+      ca: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'ca.pem'), 'utf8'),
+      servername: 'agent1',
+      checkServerIdentity () {
+        identityChecks++
+        return expectedError
+      }
+    }
+  })
+  t.after(() => pool.close())
+
+  await assert.rejects(
+    pool.request({ path: '/', method: 'GET' }),
+    /rejected by custom checkServerIdentity/
+  )
+  assert.strictEqual(identityChecks, 1)
+})
+
+test('copies connect and tls options before storing them', (t) => {
+  const connect = { timeout: 100 }
+  const tls = { servername: 'agent1' }
+  let capturedOptions
+  const pool = new BalancedPool([], {
+    connect,
+    tls,
+    factory (origin, options) {
+      capturedOptions = options
+      return new Pool(origin, options)
+    }
+  })
+  t.after(() => pool.close())
+
+  connect.timeout = 200
+  tls.servername = 'agent2'
+  pool.addUpstream('https://localhost:3000')
+
+  assert.notStrictEqual(capturedOptions.connect, connect)
+  assert.notStrictEqual(capturedOptions.tls, tls)
+  assert.deepStrictEqual(capturedOptions.connect, { timeout: 100 })
+  assert.deepStrictEqual(capturedOptions.tls, { servername: 'agent1' })
+})
+
+test('forwards a custom connect function to upstream pools', (t) => {
+  const connect = (opts, callback) => {
+    callback(new Error('custom connector'))
+  }
+  let capturedOptions
+  const pool = new BalancedPool([], {
+    connect,
+    factory (origin, options) {
+      capturedOptions = options
+      return new Pool(origin, options)
+    }
+  })
+  t.after(() => pool.close())
+
+  pool.addUpstream('https://localhost:3000')
+
+  assert.strictEqual(capturedOptions.connect, connect)
+})
+
+test('forwards tls options, including non-serializable ones, to upstream pools', (t) => {
+  const ca = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'ca.pem'))
+  const checkServerIdentity = () => new Error('rejected by custom checkServerIdentity')
+  let capturedOptions
+  const pool = new BalancedPool([], {
+    tls: { servername: 'agent1', ca, checkServerIdentity },
+    factory (origin, options) {
+      capturedOptions = options
+      return new Pool(origin, options)
+    }
+  })
+  t.after(() => pool.close())
+
+  pool.addUpstream('https://localhost:3000')
+
+  assert.strictEqual(capturedOptions.tls.servername, 'agent1')
+  assert.strictEqual(capturedOptions.tls.checkServerIdentity, checkServerIdentity)
+  assert.ok(Buffer.isBuffer(capturedOptions.tls.ca))
+  assert.ok(capturedOptions.tls.ca.equals(ca))
+})
+
+test('forwards TLS certificate validation callbacks given via the tls option', async (t) => {
+  const server = https.createServer({
+    key: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'key.pem')),
+    cert: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cert.pem'))
+  }, (req, res) => {
+    res.end('ok')
+  })
+  t.after(server.close.bind(server))
+  await promisify(server.listen).call(server, 0)
+
+  const expectedError = new Error('rejected by custom checkServerIdentity')
+  let identityChecks = 0
+  const pool = new BalancedPool(`https://localhost:${server.address().port}`, {
+    tls: {
+      ca: fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'ca.pem'), 'utf8'),
+      servername: 'agent1',
+      checkServerIdentity () {
+        identityChecks++
+        return expectedError
+      }
+    }
+  })
+  t.after(() => pool.close())
+
+  await assert.rejects(
+    pool.request({ path: '/', method: 'GET' }),
+    /rejected by custom checkServerIdentity/
+  )
+  assert.strictEqual(identityChecks, 1)
 })
 
 test('should not be vulnerable to __proto__ pollution via options', async (t) => {
